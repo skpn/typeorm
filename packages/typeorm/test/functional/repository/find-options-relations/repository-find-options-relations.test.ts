@@ -936,6 +936,58 @@ describe("repository > find options > relations > github issues > #5694 find one
                 expect(game!.platforms).to.have.lengthOf(2)
             }),
         ))
+
+    it("should return the entity a limited find returns when the database lacks the unique index", () =>
+        Promise.all(
+            dataSources.map(async (dataSource) => {
+                const queryRunner = dataSource.createQueryRunner()
+                const table = (await queryRunner.getTable("games"))!
+                const index = table.indices.find(
+                    (index) => index.name === "game_name_idx",
+                )
+                if (index) await queryRunner.dropIndex(table, index)
+                else
+                    await queryRunner.dropUniqueConstraint(
+                        table,
+                        "game_name_idx",
+                    )
+                await queryRunner.release()
+
+                const windows = new Platform()
+                windows.name = "Windows"
+                windows.slug = "windows"
+                const games: Game[] = []
+                for (const platforms of [[windows], []]) {
+                    const game = new Game()
+                    game.name = "SW Battlefront"
+                    game.searchTerms = "star-wars"
+                    game.isReviewed = false
+                    game.platforms = platforms
+                    games.push(await dataSource.manager.save(game))
+                }
+                // moves the lower id after the other one in PostgreSQL's heap
+                await dataSource.manager.update(Game, games[0].id, {
+                    isReviewed: true,
+                })
+
+                const options = {
+                    where: { name: "SW Battlefront" },
+                    relations: { platforms: true },
+                }
+                const { result: game, queries } = await spyQueries(
+                    dataSource,
+                    (queryRunner) => queryRunner.manager.findOne(Game, options),
+                )
+                const limitedGame = await dataSource
+                    .createQueryBuilder(Game, "Game")
+                    .setFindOptions({ ...options, take: 1 })
+                    .getOne()
+
+                expect(queries).to.have.lengthOf(1)
+                expect(game!.id).to.equal(games[0].id)
+                expect(game!.id).to.equal(limitedGame!.id)
+            }),
+        ))
 })
 
 describe("repository > find options > relations > github issues > #5694 find one by deferrable unique constraint", () => {

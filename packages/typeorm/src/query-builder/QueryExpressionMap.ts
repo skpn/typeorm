@@ -372,6 +372,29 @@ export class QueryExpressionMap {
         return this.orderBys
     }
 
+    /**
+     * Get all ORDER BY queries, then every primary column of the main alias in
+     * ascending order, unless an order or a selection alias already names it.
+     */
+    get allOrderBysWithPrimaryKey() {
+        const orderBys = this.allOrderBys
+        const mainAlias = this.mainAlias!
+        const orderBysWithPrimaryKey = { ...orderBys }
+        mainAlias.metadata.primaryColumns.forEach((primaryColumn) => {
+            const byPropertyPath = `${mainAlias.name}.${primaryColumn.propertyPath}`
+            const byDatabaseName = `${mainAlias.name}.${primaryColumn.databaseName}`
+            if (orderBys[byPropertyPath] || orderBys[byDatabaseName]) return
+            if (
+                this.selects.some(
+                    (select) => select.aliasName === byPropertyPath,
+                )
+            )
+                return
+            orderBysWithPrimaryKey[byPropertyPath] = "ASC"
+        })
+        return orderBysWithPrimaryKey
+    }
+
     // -------------------------------------------------------------------------
     // Public Methods
     // -------------------------------------------------------------------------

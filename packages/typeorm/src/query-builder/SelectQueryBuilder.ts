@@ -1924,7 +1924,6 @@ export class SelectQueryBuilder<Entity extends ObjectLiteral>
     }
 
     private orderBysWithPrimaryKeyTieBreak(): OrderByCondition {
-        const orderBys = this.expressionMap.allOrderBys
         const mainAlias = this.expressionMap.mainAlias
         if (
             !(this.expressionMap.skip || this.expressionMap.take) ||
@@ -1942,22 +1941,9 @@ export class SelectQueryBuilder<Entity extends ObjectLiteral>
                     select.selection.startsWith(`${mainAlias.name}.`),
             )
         )
-            return orderBys
+            return this.expressionMap.allOrderBys
 
-        const orderBysWithTieBreak = { ...orderBys }
-        mainAlias.metadata.primaryColumns.forEach((primaryColumn) => {
-            const byPropertyPath = `${mainAlias.name}.${primaryColumn.propertyPath}`
-            const byDatabaseName = `${mainAlias.name}.${primaryColumn.databaseName}`
-            if (orderBys[byPropertyPath] || orderBys[byDatabaseName]) return
-            if (
-                this.expressionMap.selects.some(
-                    (select) => select.aliasName === byPropertyPath,
-                )
-            )
-                return
-            orderBysWithTieBreak[byPropertyPath] = "ASC"
-        })
-        return orderBysWithTieBreak
+        return this.expressionMap.allOrderBysWithPrimaryKey
     }
 
     private lazyCount(entitiesAndRaw: {

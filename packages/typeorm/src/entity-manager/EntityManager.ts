@@ -24,6 +24,7 @@ import type { UpdateResult } from "../query-builder/result/UpdateResult"
 import type { DeleteResult } from "../query-builder/result/DeleteResult"
 import type { FindOptionsWhere } from "../find-options/FindOptionsWhere"
 import type { EntityMetadata } from "../metadata/EntityMetadata"
+import type { ColumnMetadata } from "../metadata/ColumnMetadata"
 import type { IsolationLevel } from "../driver/types/IsolationLevel"
 import { ObjectUtils } from "../util/ObjectUtils"
 import { isUint8Array } from "../util/Uint8ArrayUtils"
@@ -1323,18 +1324,12 @@ export class EntityManager {
         }
 
         const { skip } = options as FindManyOptions<Entity>
+        const pinnedKey =
+            skip === undefined
+                ? this.uniqueKeyPinnedBy(metadata, options.where)
+                : undefined
 
-        // create query builder and apply find options
-        return this.createQueryBuilder<Entity>(entityClass, metadata.name)
-            .setFindOptions({
-                ...options,
-                take:
-                    skip === undefined &&
-                    this.wherePinsOneRow(metadata, options.where)
-                        ? undefined
-                        : 1,
-            })
-            .getOne()
+        return this.findFirst(entityClass, metadata, options, pinnedKey)
     }
 
     /**
@@ -1350,20 +1345,45 @@ export class EntityManager {
     ): Promise<Entity | null> {
         const metadata = this.dataSource.getMetadata(entityClass)
 
-        // create query builder and apply find options
-        return this.createQueryBuilder<Entity>(entityClass, metadata.name)
-            .setFindOptions({
-                where,
-                take: this.wherePinsOneRow(metadata, where) ? undefined : 1,
-            })
-            .getOne()
+        return this.findFirst(
+            entityClass,
+            metadata,
+            { where },
+            this.uniqueKeyPinnedBy(metadata, where),
+        )
     }
 
-    private wherePinsOneRow<Entity extends ObjectLiteral>(
+    private findFirst<Entity extends ObjectLiteral>(
+        entityClass: EntityTarget<Entity>,
+        metadata: EntityMetadata,
+        options: FindManyOptions<Entity>,
+        pinnedKey: ColumnMetadata[] | undefined,
+    ): Promise<Entity | null> {
+        // create query builder and apply find options
+        const queryBuilder = this.createQueryBuilder<Entity>(
+            entityClass,
+            metadata.name,
+        ).setFindOptions({ ...options, take: pinnedKey ? undefined : 1 })
+
+        // A unique key the database lacks can match several rows: order them as
+        // the pagination query of take: 1 does, to return the same entity.
+        if (
+            pinnedKey !== undefined &&
+            pinnedKey !== metadata.primaryColumns &&
+            queryBuilder.expressionMap.joinAttributes.length > 0
+        )
+            queryBuilder.orderBy(
+                queryBuilder.expressionMap.allOrderBysWithPrimaryKey,
+            )
+
+        return queryBuilder.getOne()
+    }
+
+    private uniqueKeyPinnedBy<Entity extends ObjectLiteral>(
         metadata: EntityMetadata,
         where: FindOptionsWhere<Entity> | FindOptionsWhere<Entity>[],
-    ): boolean {
-        if (metadata.primaryColumns.length === 0) return false
+    ): ColumnMetadata[] | undefined {
+        if (metadata.primaryColumns.length === 0) return undefined
 
         const { invalidWhereValuesBehavior } = this.dataSource.options
         const isIgnored = (value: unknown) =>
@@ -1375,7 +1395,7 @@ export class EntityManager {
             .filter((branch) =>
                 Object.values(branch ?? {}).some((value) => !isIgnored(value)),
             )
-        if (queriedWheres.length !== 1) return false
+        if (queriedWheres.length !== 1) return undefined
 
         const [queriedWhere] = queriedWheres
         const uniqueColumnSets = [
@@ -1390,7 +1410,7 @@ export class EntityManager {
                 )
                 .map((index) => index.columns),
         ]
-        return uniqueColumnSets.some(
+        return uniqueColumnSets.find(
             (columns) =>
                 columns.length > 0 &&
                 columns.every((column) => {
