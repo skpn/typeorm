@@ -32,6 +32,8 @@ import type { ObjectLiteral } from "../common/ObjectLiteral"
 import type { PickKeysByType } from "../common/PickKeysByType"
 import { buildSqlTag } from "../util/SqlTagUtils"
 import { OrmUtils } from "../util/OrmUtils"
+import type { EntityMetadata } from "../metadata/EntityMetadata"
+import type { ColumnMetadata } from "../metadata/ColumnMetadata"
 
 /**
  * Entity manager supposed to work with any entity, automatically find its repository and call its methods,
@@ -1324,7 +1326,7 @@ export class EntityManager {
         return this.createQueryBuilder<Entity>(entityClass, metadata.name)
             .setFindOptions({
                 ...options,
-                take: 1,
+                take: this.getFindOneTake(metadata, options),
             })
             .getOne()
     }
@@ -1346,7 +1348,7 @@ export class EntityManager {
         return this.createQueryBuilder<Entity>(entityClass, metadata.name)
             .setFindOptions({
                 where,
-                take: 1,
+                take: this.getFindOneTake(metadata, { where }),
             })
             .getOne()
     }
@@ -1395,6 +1397,70 @@ export class EntityManager {
                 return Promise.resolve(value)
             },
         )
+    }
+
+    /**
+     * Gets the `take` applied by findOne and findOneBy. With joins, a `take`
+     * makes the query builder select the ids of the matching rows in a separate
+     * `SELECT DISTINCT` query first. It is left out when the find has no
+     * `skip` (some drivers reject an offset without a limit) and its where
+     * condition can match one row only: once the values ignored by
+     * `invalidWhereValuesBehavior` are dropped, a single condition is left, and
+     * it gives a plain value to every column of the primary key, of a
+     * non-deferrable unique constraint or of a synchronized unique index
+     * without a filter.
+     *
+     * @param metadata metadata of the searched entity
+     * @param options the options passed to findOne, or `{ where }` for
+     *   findOneBy
+     * @returns `undefined` when the where condition can match one row only,
+     *   `1` otherwise
+     */
+    private getFindOneTake(
+        metadata: EntityMetadata,
+        options: FindManyOptions<ObjectLiteral>,
+    ): number | undefined {
+        const { where, skip } = options
+        if (!where || skip !== undefined) return 1
+
+        const behavior = this.dataSource.options.invalidWhereValuesBehavior
+        const isIgnored = (value: unknown) =>
+            (value === undefined && behavior?.undefined === "ignore") ||
+            (value === null && behavior?.null === "ignore")
+        const conditions = (Array.isArray(where) ? where : [where]).filter(
+            (condition) =>
+                Object.values(condition ?? {}).some(
+                    (value) => !isIgnored(value),
+                ),
+        )
+        if (conditions.length !== 1) return 1
+
+        const [condition] = conditions
+        const hasPlainValue = (column: ColumnMetadata) => {
+            if (column.embeddedMetadata || column.relationMetadata) return false
+
+            const value = condition[column.propertyName]
+            const operand = InstanceChecker.isEqualOperator(value)
+                ? value.value
+                : value
+            return typeof operand === "string" || typeof operand === "number"
+        }
+        const uniqueColumnSets = [
+            metadata.primaryColumns,
+            ...metadata.uniques
+                .filter((unique) => !unique.deferrable)
+                .map((unique) => unique.columns),
+            ...metadata.indices
+                .filter(
+                    (index) =>
+                        index.isUnique && !index.where && index.synchronize,
+                )
+                .map((index) => index.columns),
+        ]
+        const pinsOneRow = uniqueColumnSets.some(
+            (columns) => columns.length > 0 && columns.every(hasPlainValue),
+        )
+        return pinsOneRow ? undefined : 1
     }
 
     /**

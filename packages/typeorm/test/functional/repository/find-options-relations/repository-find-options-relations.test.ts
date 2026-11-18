@@ -1,4 +1,5 @@
 import "reflect-metadata"
+import sinon from "sinon"
 import "../../../utils/test-setup"
 import {
     closeTestingConnections,
@@ -6,6 +7,12 @@ import {
     reloadTestingDatabases,
 } from "../../../utils/test-utils"
 import type { DataSource } from "../../../../src/data-source/DataSource"
+import type {
+    EntityManager,
+    FindManyOptions,
+    FindOptionsWhere,
+} from "../../../../src"
+import { Equal, In } from "../../../../src"
 import { User } from "./entity/User"
 import { Category } from "./entity/Category"
 import { Post } from "./entity/Post"
@@ -551,4 +558,97 @@ describe("repository > find options > relations", () => {
                     )
             }),
         ))
+
+    // GitHub issue #5694 - findOne with relations does two queries
+    describe("findOne query count", () => {
+        async function countQueries<T>(
+            dataSource: DataSource,
+            find: (manager: EntityManager) => Promise<T>,
+        ) {
+            const queryRunner = dataSource.createQueryRunner()
+            const query = sinon.spy(queryRunner, "query")
+            try {
+                const result = await find(queryRunner.manager)
+                return { result, queryCount: query.callCount }
+            } finally {
+                query.restore()
+                await queryRunner.release()
+            }
+        }
+
+        it("should load relations in a single query when the where pins the primary key", () =>
+            Promise.all(
+                dataSources.map(async (dataSource) => {
+                    for (const id of [1, Equal(1)]) {
+                        const { result: post, queryCount } = await countQueries(
+                            dataSource,
+                            (manager) =>
+                                manager.findOne(Post, {
+                                    where: { id },
+                                    relations: { photos: true },
+                                }),
+                        )
+                        queryCount.should.be.equal(1)
+                        post!.photos.should.have.length(3)
+                    }
+                }),
+            ))
+
+        it("should load relations in a single query when the where pins a unique column", () =>
+            Promise.all(
+                dataSources.map(async (dataSource) => {
+                    const { result: photo, queryCount } = await countQueries(
+                        dataSource,
+                        (manager) =>
+                            manager.findOne(Photo, {
+                                where: { filename: "photo2.jpg" },
+                                relations: { post: true },
+                            }),
+                    )
+                    queryCount.should.be.equal(1)
+                    photo!.id.should.be.equal(2)
+                    photo!.post.id.should.be.equal(1)
+                }),
+            ))
+
+        it("should select the entity id in a separate query when the where can match several rows", () =>
+            Promise.all(
+                dataSources.map(async (dataSource) => {
+                    const wheres: FindOptionsWhere<Post>[] = [
+                        { id: In([1]) },
+                        { title: "About Timber" },
+                        { user: { id: 1 } },
+                    ]
+                    for (const where of [...wheres, wheres]) {
+                        const { result: post, queryCount } = await countQueries(
+                            dataSource,
+                            (manager) =>
+                                manager.findOne(Post, {
+                                    where,
+                                    relations: { photos: true },
+                                }),
+                        )
+                        queryCount.should.be.equal(2)
+                        post!.photos.should.have.length(3)
+                    }
+                }),
+            ))
+
+        it("should select the entity id in a separate query when findOne receives a skip", () =>
+            Promise.all(
+                dataSources.map(async (dataSource) => {
+                    const options: FindManyOptions<Post> = {
+                        where: { id: 1 },
+                        relations: { photos: true },
+                        skip: 0,
+                    }
+                    const { result: post, queryCount } = await countQueries(
+                        dataSource,
+                        (manager) => manager.findOne(Post, options),
+                    )
+                    queryCount.should.be.equal(2)
+                    post!.photos.should.have.length(3)
+                }),
+            ))
+    })
 })

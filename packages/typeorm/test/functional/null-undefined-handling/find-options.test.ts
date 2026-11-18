@@ -1,4 +1,5 @@
 import { expect } from "chai"
+import sinon from "sinon"
 import type { DataSource } from "../../../src"
 import { TypeORMError } from "../../../src"
 import {
@@ -918,6 +919,26 @@ describe("find options > null and undefined handling", () => {
 
                     // All 3 posts have a category, so all match when name filter is skipped
                     posts.length.should.be.equal(3)
+                }),
+            ))
+
+        // GitHub issue #5694 - findOne with relations does two queries
+        it("should load findOne relations in a single query when the only condition left pins the primary key", () =>
+            Promise.all(
+                dataSources.map(async (dataSource) => {
+                    await prepareData(dataSource)
+
+                    const queryRunner = dataSource.createQueryRunner()
+                    const query = sinon.spy(queryRunner, "query")
+                    const post = await queryRunner.manager.findOne(Post, {
+                        where: [{ id: 2 }, { text: undefined }],
+                        relations: { category: true },
+                    })
+                    query.restore()
+                    await queryRunner.release()
+
+                    expect(query.callCount).to.equal(1)
+                    expect(post!.category!.name).to.equal("Category #2")
                 }),
             ))
     })

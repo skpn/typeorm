@@ -11,7 +11,7 @@ export class Photo {
     @PrimaryGeneratedColumn()
     id: number
 
-    @Column()
+    @Column({ unique: true })
     filename: string
 
     @ManyToOne(() => User)
