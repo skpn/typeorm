@@ -16,10 +16,14 @@ import { Counters } from "./entity/Counters"
 import { EntityPropertyNotFoundError } from "../../../../src/error/EntityPropertyNotFoundError"
 import type { QueryRunner } from "../../../../src/query-runner/QueryRunner"
 import { In } from "../../../../src/find-options/operator/In"
+import { Equal } from "../../../../src/find-options/operator/Equal"
 import type { FindManyOptions } from "../../../../src/find-options/FindManyOptions"
 import { Post as CompositeKeyPost } from "../../query-builder/relation-id/one-to-many/multiple-pk/entity/Post"
 import { Category as CompositeKeyCategory } from "../../query-builder/relation-id/one-to-many/multiple-pk/entity/Category"
 import { PostCategory } from "../../view-entity/general/entity/PostCategory"
+import { Game } from "../../relations/many-to-many/save-from-both-sides/entity/Game"
+import { Platform } from "../../relations/many-to-many/save-from-both-sides/entity/Platform"
+import { Company } from "../../deferrable/entity/Company"
 
 const spyQueries = async <T>(
     dataSource: DataSource,
@@ -599,6 +603,24 @@ describe("repository > find options > relations", () => {
                 }),
             ))
 
+        it("should load a one-to-many relation in a single query when the where fixes the primary key with Equal", () =>
+            Promise.all(
+                dataSources.map(async (dataSource) => {
+                    const { result: post, queries } = await spyQueries(
+                        dataSource,
+                        (queryRunner) =>
+                            queryRunner.manager.findOne(Post, {
+                                where: { id: Equal(1) },
+                                relations: { photos: true },
+                            }),
+                    )
+
+                    expect(queries).to.have.lengthOf(1)
+                    expect(post!.id).to.equal(1)
+                    expect(post!.photos).to.have.lengthOf(3)
+                }),
+            ))
+
         it("should keep the paginated queries when the where does not fix the primary key", () =>
             Promise.all(
                 dataSources.map(async (dataSource) => {
@@ -677,6 +699,32 @@ describe("repository > find options > relations", () => {
 
                     expect(post).to.equal(null)
                     expect(queries).to.eql(paginatedQueries)
+                }),
+            ))
+
+        it("should keep limiting the query to one row when skip is zero and the where fixes the primary key", () =>
+            Promise.all(
+                dataSources.map(async (dataSource) => {
+                    const options: FindManyOptions<Post> = {
+                        where: { id: 1 },
+                        skip: 0,
+                    }
+                    const { result: post, queries } = await spyQueries(
+                        dataSource,
+                        (queryRunner) =>
+                            queryRunner.manager.findOne(Post, options),
+                    )
+                    const { queries: limitedQueries } = await spyQueries(
+                        dataSource,
+                        (queryRunner) =>
+                            queryRunner.manager
+                                .createQueryBuilder(Post, "Post")
+                                .setFindOptions({ ...options, take: 1 })
+                                .getOne(),
+                    )
+
+                    expect(post!.id).to.equal(1)
+                    expect(queries).to.eql(limitedQueries)
                 }),
             ))
 
@@ -803,6 +851,133 @@ describe("repository > find options > relations > github issues > #5694 find one
 
                 expect(queries).to.have.lengthOf(1)
                 expect(queries[0]).to.match(/LIMIT 1|FETCH NEXT 1 ROWS ONLY/)
+            }),
+        ))
+})
+
+describe("repository > find options > relations > github issues > #5694 find one by unique key", () => {
+    let dataSources: DataSource[]
+    before(async () => {
+        dataSources = await createTestingConnections({
+            disabledDrivers: ["spanner"],
+            entities: [Game, Platform],
+            driverSpecific: {
+                invalidWhereValuesBehavior: {
+                    undefined: "ignore",
+                },
+            },
+        })
+    })
+    beforeEach(() => reloadTestingDatabases(dataSources))
+    after(() => closeTestingConnections(dataSources))
+
+    const saveGamesWithPlatforms = async (dataSource: DataSource) => {
+        const windows = new Platform()
+        windows.name = "Windows"
+        windows.slug = "windows"
+        const linux = new Platform()
+        linux.name = "Linux"
+        linux.slug = "linux"
+
+        for (const name of ["SW Battlefront", "SW Republic Commando"]) {
+            const game = new Game()
+            game.name = name
+            game.searchTerms = "star-wars"
+            game.isReviewed = false
+            game.platforms = [windows, linux]
+            await dataSource.manager.save(game)
+        }
+    }
+
+    it("should load a many-to-many relation in a single query when the where fixes a unique index", () =>
+        Promise.all(
+            dataSources.map(async (dataSource) => {
+                await saveGamesWithPlatforms(dataSource)
+
+                for (const where of [
+                    { name: "SW Republic Commando" },
+                    { name: Equal("SW Republic Commando") },
+                ]) {
+                    const { result: game, queries } = await spyQueries(
+                        dataSource,
+                        (queryRunner) =>
+                            queryRunner.manager.findOne(Game, {
+                                where,
+                                relations: { platforms: true },
+                            }),
+                    )
+
+                    expect(queries).to.have.lengthOf(1)
+                    expect(game!.name).to.equal("SW Republic Commando")
+                    expect(game!.platforms).to.have.lengthOf(2)
+                }
+            }),
+        ))
+
+    it("should load a many-to-many relation in a single query when the other branches of the where are ignored", () =>
+        Promise.all(
+            dataSources.map(async (dataSource) => {
+                await saveGamesWithPlatforms(dataSource)
+
+                const { result: game, queries } = await spyQueries(
+                    dataSource,
+                    (queryRunner) =>
+                        queryRunner.manager.findOne(Game, {
+                            where: [
+                                { name: "SW Republic Commando" },
+                                { searchTerms: undefined },
+                            ],
+                            relations: { platforms: true },
+                        }),
+                )
+
+                expect(queries).to.have.lengthOf(1)
+                expect(game!.name).to.equal("SW Republic Commando")
+                expect(game!.platforms).to.have.lengthOf(2)
+            }),
+        ))
+})
+
+describe("repository > find options > relations > github issues > #5694 find one by deferrable unique constraint", () => {
+    let dataSources: DataSource[]
+    before(async () => {
+        dataSources = await createTestingConnections({
+            enabledDrivers: ["better-sqlite3", "postgres"],
+            entities: [Company],
+        })
+    })
+    beforeEach(() => reloadTestingDatabases(dataSources))
+    after(() => closeTestingConnections(dataSources))
+
+    it("should keep limiting the query to one row", () =>
+        Promise.all(
+            dataSources.map(async (dataSource) => {
+                const company = new Company()
+                company.id = 1
+                company.name = "Acme"
+                await dataSource.manager.save(company)
+
+                const { result: foundCompany, queries } = await spyQueries(
+                    dataSource,
+                    (queryRunner) =>
+                        queryRunner.manager.findOneBy(Company, {
+                            name: "Acme",
+                        }),
+                )
+                const { queries: limitedQueries } = await spyQueries(
+                    dataSource,
+                    (queryRunner) =>
+                        queryRunner.manager
+                            .createQueryBuilder(Company, "Company")
+                            .setFindOptions({
+                                where: { name: "Acme" },
+                                take: 1,
+                            })
+                            .getOne(),
+                )
+
+                expect(foundCompany!.id).to.equal(1)
+                expect(queries).to.eql(limitedQueries)
             }),
         ))
 })

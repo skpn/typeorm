@@ -1329,8 +1329,8 @@ export class EntityManager {
             .setFindOptions({
                 ...options,
                 take:
-                    !skip &&
-                    this.wherePinsEveryPrimaryColumn(metadata, options.where)
+                    skip === undefined &&
+                    this.wherePinsOneRow(metadata, options.where)
                         ? undefined
                         : 1,
             })
@@ -1354,31 +1354,60 @@ export class EntityManager {
         return this.createQueryBuilder<Entity>(entityClass, metadata.name)
             .setFindOptions({
                 where,
-                take: this.wherePinsEveryPrimaryColumn(metadata, where)
-                    ? undefined
-                    : 1,
+                take: this.wherePinsOneRow(metadata, where) ? undefined : 1,
             })
             .getOne()
     }
 
-    private wherePinsEveryPrimaryColumn<Entity extends ObjectLiteral>(
+    private wherePinsOneRow<Entity extends ObjectLiteral>(
         metadata: EntityMetadata,
         where: FindOptionsWhere<Entity> | FindOptionsWhere<Entity>[],
     ): boolean {
-        if (Array.isArray(where) || metadata.primaryColumns.length === 0)
-            return false
+        if (metadata.primaryColumns.length === 0) return false
 
-        const queriedWhere = this.queriedWhere(where) as ObjectLiteral
-        return metadata.primaryColumns.every((column) => {
-            const value: unknown = column.getEntityValue(queriedWhere)
-            return (
-                typeof value === "string" ||
-                typeof value === "number" ||
-                typeof value === "bigint" ||
-                typeof value === "boolean" ||
-                value instanceof Date
+        const { invalidWhereValuesBehavior } = this.dataSource.options
+        const isIgnored = (value: unknown) =>
+            (value === undefined &&
+                invalidWhereValuesBehavior?.undefined === "ignore") ||
+            (value === null && invalidWhereValuesBehavior?.null === "ignore")
+        const queriedWheres = (Array.isArray(where) ? where : [where])
+            .map((branch) => this.queriedWhere(branch) as ObjectLiteral)
+            .filter((branch) =>
+                Object.values(branch ?? {}).some((value) => !isIgnored(value)),
             )
-        })
+        if (queriedWheres.length !== 1) return false
+
+        const [queriedWhere] = queriedWheres
+        const uniqueColumnSets = [
+            metadata.primaryColumns,
+            ...metadata.uniques
+                .filter((unique) => !unique.deferrable)
+                .map((unique) => unique.columns),
+            ...metadata.indices
+                .filter(
+                    (index) =>
+                        index.isUnique && !index.where && index.synchronize,
+                )
+                .map((index) => index.columns),
+        ]
+        return uniqueColumnSets.some(
+            (columns) =>
+                columns.length > 0 &&
+                columns.every((column) => {
+                    const entityValue: unknown =
+                        column.getEntityValue(queriedWhere)
+                    const value = InstanceChecker.isEqualOperator(entityValue)
+                        ? entityValue.value
+                        : entityValue
+                    return (
+                        typeof value === "string" ||
+                        typeof value === "number" ||
+                        typeof value === "bigint" ||
+                        typeof value === "boolean" ||
+                        value instanceof Date
+                    )
+                }),
+        )
     }
 
     /**
